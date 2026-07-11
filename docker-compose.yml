@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  bot-penagih:
+    build: .
+    container_name: morbis_bot_penagih
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      # Melakukan mounting file database agar tersimpan aman di host machine (server)
+      - ./database_v2.json:/app/database_v2.json
+    environment:
+      - NODE_ENV=production
