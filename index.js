@@ -1,7 +1,7 @@
 // Panggil dotenv di baris paling atas agar env terisi sebelum bot berjalan
 require('dotenv').config();
 
-const { Telegraf } = require('telegraf');
+const { Telegraf, session } = require('telegraf'); // Menggunakan session bawaan Telegraf
 const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
@@ -9,10 +9,8 @@ const path = require('path');
 console.log('⏳ [Step 1/4] Memulai inisialisasi konfigurasi...');
 
 // ==================== KONFIGURASI ====================
-// Mengambil token dari environment variable
 const BOT_TOKEN = process.env.BOT_TOKEN;
 
-// Validasi ketat untuk Node.js v24 agar bot tidak diam jika token kosong
 if (!BOT_TOKEN) {
     console.error('❌ ERROR FATAL: BOT_TOKEN tidak ditemukan di file .env!');
     process.exit(1);
@@ -20,11 +18,15 @@ if (!BOT_TOKEN) {
 // =====================================================
 
 const bot = new Telegraf(BOT_TOKEN);
+
+// Aktifkan middleware session agar bot bisa melacak status percakapan user
+bot.use(session());
+
 const DB_FILE = path.join(__dirname, 'database_v2.json');
 
 const defaultData = {
     users: [],
-    schedules: {}    // Struktur baru di dalam: { senderId: [ { id: 1, messageText: '', targets: [], doneTargets: [], cronInterval: '4h', lastSent: 0 } ] }
+    schedules: {}
 };
 
 // Fungsi membaca database
@@ -75,16 +77,19 @@ bot.start((ctx) => {
         writeDB(db);
     }
 
-    ctx.reply(
-        `👋 Selamat datang ${from.first_name}!\n\n` +
-        `Bot ini mendukung multi-pesan aktif! Berikut perintahnya:\n` +
-        `1. Ketik /users untuk melihat daftar nomor pengguna bot.\n` +
-        `2. Ketik /setpesan [isi pesan] untuk membuat pengingat baru.\n` +
-        `3. Ketik /setwaktu [id_pesan] [jeda] untuk atur waktu (Contoh: /setwaktu 1 15m).\n` +
-        `4. Ketik /settarget [id_pesan] [nomor] untuk target (Contoh: /settarget 1 1,2).\n` +
-        `5. Ketik /status untuk melihat semua daftar pengingat aktif Anda.\n\n` +
-        `6. Ketik /delpesan [id_pesan] untuk menghapus pengingat yang tidak jadi dipakai.\n\n` +
-        `💡 *Info untuk Target:* Jika tugas selesai, balas dengan \`/done [id_pesan]\` (Contoh: /done 1)`
+    ctx.replyWithMarkdown(
+        `👋 *Selamat datang, ${from.first_name}!*\n\n` +
+        `Bot ini dirancang untuk mengirimkan pesan pengingat secara berkala kepada target sampai mereka merespons \`/done\`.\n\n` +
+        `📌 *DAFTAR PERINTAH UTAMA (Interaktif):*\n` +
+        `🎵 \`/users\` — Melihat daftar nomor urut pengguna bot.\n` +
+        `📝 \`/setpesan\` — Membuat teks pengingat baru.\n` +
+        `⏱️ \`/setwaktu\` — Mengatur jeda waktu pengiriman ulang pesan.\n` +
+        `🎯 \`/settarget\` — Memilih target pengguna yang akan dikirimi pesan.\n` +
+        `📊 \`/status\` — Meninjau semua daftar antrean pengingat aktif Anda.\n` +
+        `🗑️ \`/delpesan\` — Menghapus pesan pengingat tertentu.\n\n` +
+        `💡 *Info Penting untuk Penerima Target:* \n` +
+        `Jika tugas dari pesan terkait sudah selesai dilakukan, Anda wajib membalas dengan mengetik:\n` +
+        `➡️ \`/done [id_pesan]\` *(Contoh: \`/done 1\`)*`
     );
 });
 
@@ -105,149 +110,32 @@ bot.command('users', (ctx) => {
     ctx.replyWithMarkdown(response);
 });
 
+// Alur /setpesan interaktif
 bot.command('setpesan', (ctx) => {
-    const senderId = ctx.from.id;
-    const text = ctx.message.text.replace('/setpesan ', '').trim();
-
-    if (!text || text === '/setpesan') {
-        return ctx.reply("⚠️ Format salah. Contoh: /setpesan Tolong review codingan Modul A");
-    }
-
-    const db = readDB();
-
-    if (!db.schedules[senderId]) {
-        db.schedules[senderId] = [];
-    }
-
-    // Tentukan ID baru (auto increment berdasarkan data user tersebut)
-    const newId = db.schedules[senderId].length > 0
-        ? Math.max(...db.schedules[senderId].map(s => s.id)) + 1
-        : 1;
-
-    const newSchedule = {
-        id: newId,
-        messageText: text,
-        targets: [],
-        doneTargets: [],
-        cronInterval: '4h',
-        lastSent: 0
-    };
-
-    db.schedules[senderId].push(newSchedule);
-    writeDB(db);
-
-    ctx.replyWithMarkdown(`✅ Pesan baru berhasil dibuat dengan **ID: ${newId}**\n\n💬 Pesan: "${text}"\n\n⏱️ _Default jeda: 4 jam. Silakan atur target menggunakan perintah:_\n\`/settarget ${newId} [nomor_user]\``);
+    if (!ctx.session) ctx.session = {};
+    ctx.session.state = 'MENUNGGU_ISI_PESAN';
+    ctx.reply("📝 Silakan inputkan pesanya:");
 });
 
+// Alur /setwaktu interaktif Tahap 1
 bot.command('setwaktu', (ctx) => {
-    const senderId = ctx.from.id;
-    const args = ctx.message.text.replace('/setwaktu ', '').trim().split(' ');
-
-    if (args.length < 2 || args[0] === '/setwaktu') {
-        return ctx.reply("⚠️ Format salah. Contoh: /setwaktu 1 30m (Artinya: Pesan ID 1 di-set tiap 30 menit) atau /setwaktu 2 4h");
-    }
-
-    const targetMsgId = parseInt(args[0]);
-    const timeInput = args[1].toLowerCase();
-    const match = timeInput.match(/^(\d+)(m|h)$/);
-
-    if (!match) {
-        return ctx.reply("⚠️ Format waktu harus berupa angka diikuti 'm' (menit) atau 'h' (jam). Contoh: 15m, 2h");
-    }
-
-    const db = readDB();
-    const userSchedules = db.schedules[senderId] || [];
-    const schedule = userSchedules.find(s => s.id === targetMsgId);
-
-    if (!schedule) {
-        return ctx.reply(`❌ Pengingat dengan ID ${targetMsgId} tidak ditemukan. Cek list di /status`);
-    }
-
-    schedule.cronInterval = timeInput;
-    writeDB(db);
-
-    const timeLabel = match[2] === 'm' ? 'Menit' : 'Jam';
-    ctx.replyWithMarkdown(`✅ Jeda untuk Pesan **ID: ${targetMsgId}** berhasil diatur menjadi setiap: *${match[1]} ${timeLabel}*`);
+    if (!ctx.session) ctx.session = {};
+    ctx.session.state = 'MENUNGGU_ID_WAKTU';
+    ctx.reply("⏱️ Silahkan masukkan id pesanya:");
 });
 
+// Alur /settarget interaktif Tahap 1
 bot.command('settarget', (ctx) => {
-    const senderId = ctx.from.id;
-    const args = ctx.message.text.replace('/settarget ', '').trim().split(' ');
-
-    if (args.length < 2 || args[0] === '/settarget') {
-        return ctx.reply("⚠️ Format salah. Contoh: /settarget 1 1,2 (Artinya: Pesan ID 1 ditargetkan ke user nomor 1 dan 2)");
-    }
-
-    const targetMsgId = parseInt(args[0]);
-    const targetInput = args[1];
-
-    const db = readDB();
-    const userSchedules = db.schedules[senderId] || [];
-    const schedule = userSchedules.find(s => s.id === targetMsgId);
-
-    if (!schedule) {
-        return ctx.reply(`❌ Pengingat dengan ID ${targetMsgId} tidak ditemukan.`);
-    }
-
-    const choices = targetInput.split(',').map(num => parseInt(num.trim()) - 1);
-
-    schedule.targets = [];
-    schedule.doneTargets = [];
-    schedule.lastSent = Date.now(); // Mulai hitung mundur pengiriman dari sekarang
-
-    let targetNames = [];
-    choices.forEach(index => {
-        if (db.users[index]) {
-            const targetUser = db.users[index];
-            if (!schedule.targets.includes(targetUser.id)) {
-                schedule.targets.push(targetUser.id);
-                targetNames.push(targetUser.first_name);
-            }
-        }
-    });
-
-    writeDB(db);
-
-    if (targetNames.length > 0) {
-        const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
-        const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
-        ctx.replyWithMarkdown(`🎯 Pesan **ID: ${targetMsgId}** berhasil diseting menuju: ${targetNames.join(', ')}\nBot mulai mengirim berkala tiap *${label}*.`);
-    } else {
-        ctx.reply("❌ Nomor urut user salah. Cek daftar nomor di `/users`.");
-    }
+    if (!ctx.session) ctx.session = {};
+    ctx.session.state = 'MENUNGGU_ID_TARGET';
+    ctx.reply("🎯 Silahkan pilih id pesan:");
 });
 
+// REVISI SEKARANG: /delpesan interaktif Tahap 1 (Meminta ID Pesan)
 bot.command('delpesan', (ctx) => {
-    const senderId = ctx.from.id;
-    const text = ctx.message.text.replace('/delpesan ', '').trim();
-
-    if (!text || text === '/delpesan') {
-        return ctx.reply("⚠️ Format salah. Contoh: /delpesan 1 (Artinya: Menghapus pengingat dengan ID 1)");
-    }
-
-    const targetMsgId = parseInt(text);
-    if (isNaN(targetMsgId)) {
-        return ctx.reply("⚠️ ID Pesan harus berupa angka. Contoh: /delpesan 1");
-    }
-
-    const db = readDB();
-    const userSchedules = db.schedules[senderId] || [];
-
-    // Cari index pesan yang ingin dihapus
-    const scheduleIndex = userSchedules.findIndex(s => s.id === targetMsgId);
-
-    if (scheduleIndex === -1) {
-        return ctx.reply(`❌ Pengingat dengan ID ${targetMsgId} tidak ditemukan dalam daftar aktif Anda. Cek di /status`);
-    }
-
-    // Ambil teks pesan sekadar untuk konfirmasi di reply
-    const deletedMessageText = userSchedules[scheduleIndex].messageText;
-
-    // Hapus dari array schedules milik user
-    db.schedules[senderId].splice(scheduleIndex, 1);
-    writeDB(db);
-
-    ctx.replyWithMarkdown(`🗑️ **Pengingat ID #${targetMsgId} Berhasil Dihapus!**\n\n💬 Teks pesan sebelumnya:\n_"${deletedMessageText}"_\n\nStatus antrean dibersihkan dan bot berhenti mengirim pesan ini.`);
+    if (!ctx.session) ctx.session = {};
+    ctx.session.state = 'MENUNGGU_ID_HAPUS';
+    ctx.reply("🗑️ Silahkan pilih id pesan:");
 });
 
 bot.command('status', (ctx) => {
@@ -292,6 +180,219 @@ bot.command('status', (ctx) => {
     ctx.replyWithMarkdown(response);
 });
 
+// ==================== MIDDLEWARE UNTUK MENANGKAP INPUT STATE ====================
+bot.on('text', (ctx, next) => {
+    if (!ctx.session) ctx.session = {};
+    const text = ctx.message.text.trim();
+    const senderId = ctx.from.id;
+
+    // Jika user malah mengetik command berawalan /, batalkan state tanya-jawab yang sedang berjalan
+    if (text.startsWith('/')) {
+        ctx.session.state = null;
+        return next();
+    }
+
+    // 1. STATE: Menerima Teks Isi Pesan (/setpesan)
+    if (ctx.session.state === 'MENUNGGU_ISI_PESAN') {
+        const db = readDB();
+
+        if (!db.schedules[senderId]) {
+            db.schedules[senderId] = [];
+        }
+
+        const newId = db.schedules[senderId].length > 0
+            ? Math.max(...db.schedules[senderId].map(s => s.id)) + 1
+            : 1;
+
+        const newSchedule = {
+            id: newId,
+            messageText: text,
+            targets: [],
+            doneTargets: [],
+            cronInterval: '4h',
+            lastSent: 0
+        };
+
+        db.schedules[senderId].push(newSchedule);
+        writeDB(db);
+
+        ctx.session.state = null; // Reset state
+        return ctx.replyWithMarkdown(`✅ Pesan baru berhasil dibuat dengan **ID: ${newId}**\n\n💬 Pesan: "${text}"\n\n⏱️ _Default jeda: 4 jam. Silakan atur jeda waktu menggunakan perintah:_ \`/setwaktu\``);
+    }
+
+    // 2. STATE: Menerima ID Pesan untuk Waktu (/setwaktu Tahap 1)
+    if (ctx.session.state === 'MENUNGGU_ID_WAKTU') {
+        const targetMsgId = parseInt(text);
+
+        if (isNaN(targetMsgId)) {
+            return ctx.reply("⚠️ ID Pesan harus berupa angka. Silahkan masukkan kembali id pesanya:");
+        }
+
+        const db = readDB();
+        const userSchedules = db.schedules[senderId] || [];
+        const schedule = userSchedules.find(s => s.id === targetMsgId);
+
+        if (!schedule) {
+            return ctx.reply(`❌ Pengingat dengan ID ${targetMsgId} tidak ditemukan. Silahkan masukkan ID pesan yang benar (cek di /status):`);
+        }
+
+        ctx.session.tempWaktuMsgId = targetMsgId;
+        ctx.session.state = 'MENUNGGU_NILAI_WAKTU';
+
+        return ctx.replyWithMarkdown(
+            `⏱️ *Silahkan masukkan jeda waktunya sesuai aturan:*\n\n` +
+            `⚙️ *Aturan Format Waktu:*\n` +
+            `• Gunakan angka diikuti huruf \`m\` untuk satuan *Menit*.\n` +
+            `• Gunakan angka diikuti huruf \`h\` untuk satuan *Jam*.\n\n` +
+            `💡 *Contoh Input (Pilih salah satu):*\n` +
+            `• Ketik \`15m\` (jika ingin dikirim ulang tiap 15 menit)\n` +
+            `• Ketik \`2h\` (jika ingin dikirim ulang tiap 2 jam)`
+        );
+    }
+
+    // 3. STATE: Menerima Nilai Waktu (/setwaktu Tahap 2 - Final)
+    if (ctx.session.state === 'MENUNGGU_NILAI_WAKTU') {
+        const targetMsgId = ctx.session.tempWaktuMsgId;
+
+        if (!targetMsgId) {
+            ctx.session.state = null;
+            return ctx.reply("❌ Terjadi kesalahan sesi. Silakan ulangi dengan perintah /setwaktu");
+        }
+
+        const timeInput = text.toLowerCase();
+        const match = timeInput.match(/^(\d+)(m|h)$/);
+
+        if (!match) {
+            return ctx.reply("⚠️ Format salah! Waktu harus berupa angka diikuti 'm' (menit) atau 'h' (jam).\n\nSilahkan masukkan kembali sesuai contoh (misal: 15m atau 2h):");
+        }
+
+        const db = readDB();
+        const userSchedules = db.schedules[senderId] || [];
+        const schedule = userSchedules.find(s => s.id === targetMsgId);
+
+        if (!schedule) {
+            ctx.session.state = null;
+            return ctx.reply("❌ Data pengingat tidak ditemukan. Proses dibatalkan.");
+        }
+
+        schedule.cronInterval = timeInput;
+        writeDB(db);
+
+        const timeLabel = match[2] === 'm' ? 'Menit' : 'Jam';
+
+        ctx.session.state = null;
+        ctx.session.tempWaktuMsgId = null;
+
+        return ctx.replyWithMarkdown(`✅ Jeda untuk Pesan **ID: ${targetMsgId}** berhasil diatur menjadi setiap: *${match[1]} ${timeLabel}*`);
+    }
+
+    // 4. STATE: Menerima ID Pesan untuk Target (/settarget Tahap 1)
+    if (ctx.session.state === 'MENUNGGU_ID_TARGET') {
+        const targetMsgId = parseInt(text);
+
+        if (isNaN(targetMsgId)) {
+            return ctx.reply("⚠️ ID Pesan harus berupa angka. Silahkan masukkan kembali id pesan:");
+        }
+
+        const db = readDB();
+        const userSchedules = db.schedules[senderId] || [];
+        const schedule = userSchedules.find(s => s.id === targetMsgId);
+
+        if (!schedule) {
+            return ctx.reply(`❌ Pengingat dengan ID ${targetMsgId} tidak ditemukan. Silahkan masukkan ID pesan yang benar (cek di /status):`);
+        }
+
+        ctx.session.tempTargetMsgId = targetMsgId;
+        ctx.session.state = 'MENUNGGU_NOMOR_TARGET';
+
+        return ctx.replyWithMarkdown(
+            `👤 *Silahkan masukkan nomor user target:*\n\n` +
+            `💡 _Info: Ambil nomor urut user dari perintah /users_\n` +
+            `🔹 Jika target hanya *1 user*, langsung ketik angkanya saja. Contoh: \`1\`\n` +
+            `🔹 Jika target *lebih dari satu user*, pisahkan dengan tanda koma. Contoh: \`1,2\` atau \`1,3,4\``
+        );
+    }
+
+    // 5. STATE: Menerima Nomor User (/settarget Tahap 2 - Final)
+    if (ctx.session.state === 'MENUNGGU_NOMOR_TARGET') {
+        const targetMsgId = ctx.session.tempTargetMsgId;
+
+        if (!targetMsgId) {
+            ctx.session.state = null;
+            return ctx.reply("❌ Terjadi kesalahan sesi. Silakan ulangi dengan perintah /settarget");
+        }
+
+        const db = readDB();
+        const userSchedules = db.schedules[senderId] || [];
+        const schedule = userSchedules.find(s => s.id === targetMsgId);
+
+        if (!schedule) {
+            ctx.session.state = null;
+            return ctx.reply("❌ Data pengingat mendadak tidak ditemukan. Proses dibatalkan.");
+        }
+
+        const choices = text.split('.').join(',').split(',').map(num => parseInt(num.trim()) - 1);
+
+        schedule.targets = [];
+        schedule.doneTargets = [];
+        schedule.lastSent = Date.now();
+
+        let targetNames = [];
+        choices.forEach(index => {
+            if (db.users[index]) {
+                const targetUser = db.users[index];
+                if (!schedule.targets.includes(targetUser.id)) {
+                    schedule.targets.push(targetUser.id);
+                    targetNames.push(targetUser.first_name);
+                }
+            }
+        });
+
+        if (targetNames.length > 0) {
+            writeDB(db);
+            const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
+            const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
+
+            ctx.session.state = null;
+            ctx.session.tempTargetMsgId = null;
+
+            return ctx.replyWithMarkdown(`🎯 Pesan **ID: ${targetMsgId}** berhasil diseting menuju: ${targetNames.join(', ')}\nBot mulai mengirim berkala tiap *${label}*.`);
+        } else {
+            return ctx.reply("❌ Nomor urut user salah atau tidak terdaftar di sistem. Silahkan masukkan ulang nomor target yang benar:");
+        }
+    }
+
+    // REVISI SEKARANG: 6. STATE: Menerima ID Pesan untuk Dihapus (/delpesan Tahap 2 - Final)
+    if (ctx.session.state === 'MENUNGGU_ID_HAPUS') {
+        const targetMsgId = parseInt(text);
+
+        if (isNaN(targetMsgId)) {
+            return ctx.reply("⚠️ ID Pesan harus berupa angka. Silahkan masukkan kembali id pesan yang ingin dihapus:");
+        }
+
+        const db = readDB();
+        const userSchedules = db.schedules[senderId] || [];
+        const scheduleIndex = userSchedules.findIndex(s => s.id === targetMsgId);
+
+        if (scheduleIndex === -1) {
+            return ctx.reply(`❌ Pengingat dengan ID ${targetMsgId} tidak ditemukan dalam daftar aktif Anda. Silahkan masukkan ID pesan yang benar (cek di /status):`);
+        }
+
+        const deletedMessageText = userSchedules[scheduleIndex].messageText;
+
+        // Hapus dari array database jika ID valid
+        db.schedules[senderId].splice(scheduleIndex, 1);
+        writeDB(db);
+
+        // Reset state setelah berhasil dihapus
+        ctx.session.state = null;
+
+        return ctx.replyWithMarkdown(`🗑️ **Pengingat ID #${targetMsgId} Berhasil Dihapus!**\n\n💬 Teks pesan sebelumnya:\n_"${deletedMessageText}"_\n\nStatus antrean dibersihkan dan bot berhenti mengirim pesan ini.`);
+    }
+
+    return next();
+});
+
 // ==================== RESPONSE DONE BERDASARKAN ID PESAN ====================
 
 bot.hears(/^\/(done)\s+(\d+)$/, (ctx) => {
@@ -302,10 +403,8 @@ bot.hears(/^\/(done)\s+(\d+)$/, (ctx) => {
 
     const db = readDB();
     let updated = false;
-    let senderToNotify = null;
 
     Object.keys(db.schedules).forEach((senderId) => {
-        // Cari schedule spesifik milik sender yang memiliki ID pesan tersebut
         const scheduleIndex = db.schedules[senderId].findIndex(s => s.id === targetMsgId);
 
         if (scheduleIndex !== -1) {
@@ -316,12 +415,10 @@ bot.hears(/^\/(done)\s+(\d+)$/, (ctx) => {
                 schedule.targets.splice(index, 1);
                 schedule.doneTargets.push({ id: targetId, name: targetName, username: targetUsername });
                 updated = true;
-                senderToNotify = senderId;
 
                 const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
                 const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
 
-                // Buat Laporan Info Cepat Realtime
                 let reportMsg = `🔔 **INFO CEPAT: TARGET MERESPON DONE (ID: ${targetMsgId})**\n\n`;
                 reportMsg += `📝 **Isi Pesan:**\n_"${schedule.messageText}"_\n\n`;
                 reportMsg += `✅ **Sudah Done:**\n`;
@@ -340,7 +437,6 @@ bot.hears(/^\/(done)\s+(\d+)$/, (ctx) => {
 
                 bot.telegram.sendMessage(senderId, reportMsg, { parse_mode: 'Markdown' }).catch(e => console.error(e));
 
-                // Jika target habis, hapus elemen pesan ini dari array antrean milik sender
                 if (schedule.targets.length === 0) {
                     db.schedules[senderId].splice(scheduleIndex, 1);
                 }
@@ -356,9 +452,8 @@ bot.hears(/^\/(done)\s+(\d+)$/, (ctx) => {
     }
 });
 
-// Fallback untuk yang typo ketik 'done' tanpa ID
 bot.hears(/^(done|Done|DONE)$/, (ctx) => {
-    ctx.reply("💡 Untuk menyelesaikan antrean pesan, gunakan format: `/done [id_pesan]`\nContoh: `/done 1`\n\nAnda bisa melihat daftar ID pesan aktif pada info laporan berkala.");
+    ctx.replyWithMarkdown("💡 Untuk menyelesaikan antrean pesan, gunakan format: `/done [id_pesan]`\nContoh: `/done 1`\n\nAnda bisa melihat daftar ID pesan aktif pada info laporan berkala.");
 });
 
 console.log('⏳ [Step 3/4] Mengaktifkan mesin checker dinamis (Tiap 1 Menit)...');
@@ -370,7 +465,6 @@ cron.schedule('*/1 * * * *', () => {
     let isDbChanged = false;
 
     Object.keys(db.schedules).forEach((senderId) => {
-        // Melakukan perulangan di dalam array multi-pesan milik sender
         db.schedules[senderId].forEach((schedule) => {
             if (schedule.targets && schedule.targets.length > 0) {
                 const intervalStr = schedule.cronInterval || '4h';
@@ -391,13 +485,11 @@ cron.schedule('*/1 * * * *', () => {
                     schedule.lastSent = now;
                     isDbChanged = true;
 
-                    // 1. Spam pesan ke sisa target
                     schedule.targets.forEach((targetId) => {
                         bot.telegram.sendMessage(targetId, `[PENGINGAT ID: ${schedule.id}]\n\n${schedule.messageText}\n\n💡 Ketik \`/done ${schedule.id}\` jika sudah selesai.`, { parse_mode: 'Markdown' })
                             .catch((err) => console.error(`Gagal kirim ke ${targetId}:`, err.message));
                     });
 
-                    // 2. Kirim laporan berkala ke sender
                     const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
                     let reportMsg = `📊 **LAPORAN BERKALA PESAN ID #${schedule.id} (Tiap ${label})**\n\n`;
                     reportMsg += `📝 **Isi Teks:** "${schedule.messageText}"\n\n`;
