@@ -79,7 +79,7 @@ bot.start((ctx) => {
 
     ctx.replyWithMarkdown(
         `👋 *Selamat datang, ${from.first_name}!*\n\n` +
-        `Bot ini dirancang untuk mengirimkan pesan pengingat secara berkala kepada target sampai mereka merespons \`/done\`.\n\n` +
+        `Bot ini dirancang untuk mengirimkan pesan pengingat secara berkala kepada target sampai mereka merespons dengan menyatakan tugas selesai.\n\n` +
         `📌 *DAFTAR PERINTAH UTAMA (Interaktif):*\n` +
         `🎵 \`/users\` — Melihat daftar nomor urut pengguna bot.\n` +
         `📝 \`/setpesan\` — Membuat teks pengingat baru.\n` +
@@ -88,8 +88,8 @@ bot.start((ctx) => {
         `📊 \`/status\` — Meninjau semua daftar antrean pengingat aktif Anda.\n` +
         `🗑️ \`/delpesan\` — Menghapus pesan pengingat tertentu.\n\n` +
         `💡 *Info Penting untuk Penerima Target:* \n` +
-        `Jika tugas dari pesan terkait sudah selesai dilakukan, Anda wajib membalas dengan mengetik:\n` +
-        `➡️ \`/done [id_pesan]\` *(Contoh: \`/done 1\`)*`
+        `Jika tugas dari pesan terkait sudah selesai dilakukan, Anda wajib membalas dengan cara:\n` +
+        `➡️ Ketik perintah \`/done\` lalu masukkan ID pesan saat diminta oleh bot.`
     );
 });
 
@@ -131,11 +131,18 @@ bot.command('settarget', (ctx) => {
     ctx.reply("🎯 Silahkan pilih id pesan:");
 });
 
-// REVISI SEKARANG: /delpesan interaktif Tahap 1 (Meminta ID Pesan)
+// Alur /delpesan interaktif Tahap 1
 bot.command('delpesan', (ctx) => {
     if (!ctx.session) ctx.session = {};
     ctx.session.state = 'MENUNGGU_ID_HAPUS';
     ctx.reply("🗑️ Silahkan pilih id pesan:");
+});
+
+// REVISI SEKARANG: Alur /done interaktif Tahap 1 (Meminta ID Pesan)
+bot.command('done', (ctx) => {
+    if (!ctx.session) ctx.session = {};
+    ctx.session.state = 'MENUNGGU_ID_DONE';
+    ctx.reply("✅ Silahkan pilih id pesan yang ingin done:");
 });
 
 bot.command('status', (ctx) => {
@@ -362,7 +369,7 @@ bot.on('text', (ctx, next) => {
         }
     }
 
-    // REVISI SEKARANG: 6. STATE: Menerima ID Pesan untuk Dihapus (/delpesan Tahap 2 - Final)
+    // 6. STATE: Menerima ID Pesan untuk Dihapus (/delpesan Tahap 2 - Final)
     if (ctx.session.state === 'MENUNGGU_ID_HAPUS') {
         const targetMsgId = parseInt(text);
 
@@ -384,76 +391,83 @@ bot.on('text', (ctx, next) => {
         db.schedules[senderId].splice(scheduleIndex, 1);
         writeDB(db);
 
-        // Reset state setelah berhasil dihapus
         ctx.session.state = null;
 
         return ctx.replyWithMarkdown(`🗑️ **Pengingat ID #${targetMsgId} Berhasil Dihapus!**\n\n💬 Teks pesan sebelumnya:\n_"${deletedMessageText}"_\n\nStatus antrean dibersihkan dan bot berhenti mengirim pesan ini.`);
     }
 
+    // REVISI SEKARANG: 7. STATE: Menerima ID Pesan untuk diproses DONE (/done Tahap 2 - Final)
+    if (ctx.session.state === 'MENUNGGU_ID_DONE') {
+        const targetMsgId = parseInt(text);
+
+        if (isNaN(targetMsgId)) {
+            return ctx.reply("⚠️ ID Pesan harus berupa angka. Silahkan masukkan kembali id pesan yang ingin done:");
+        }
+
+        const targetId = ctx.chat.id;
+        const targetName = ctx.from.first_name;
+        const targetUsername = ctx.from.username ? `@${ctx.from.username}` : 'Tanpa Username';
+
+        const db = readDB();
+        let updated = false;
+
+        Object.keys(db.schedules).forEach((sId) => {
+            const scheduleIndex = db.schedules[sId].findIndex(s => s.id === targetMsgId);
+
+            if (scheduleIndex !== -1) {
+                const schedule = db.schedules[sId][scheduleIndex];
+                const index = schedule.targets.indexOf(targetId);
+
+                if (index !== -1) {
+                    schedule.targets.splice(index, 1);
+                    schedule.doneTargets.push({ id: targetId, name: targetName, username: targetUsername });
+                    updated = true;
+
+                    const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
+                    const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
+
+                    let reportMsg = `🔔 **INFO CEPAT: TARGET MERESPON DONE (ID: ${targetMsgId})**\n\n`;
+                    reportMsg += `📝 **Isi Pesan:**\n_"${schedule.messageText}"_\n\n`;
+                    reportMsg += `✅ **Sudah Done:**\n`;
+                    schedule.doneTargets.forEach((t, idx) => reportMsg += `${idx + 1}. ${t.name} (${t.username})\n`);
+
+                    reportMsg += `\n⏳ **Belum Done:**\n`;
+                    if (schedule.targets.length > 0) {
+                        schedule.targets.forEach((tId, idx) => {
+                            const uObj = db.users.find(u => u.id === tId);
+                            reportMsg += `${idx + 1}. ${uObj ? uObj.first_name : 'User'} (${uObj ? uObj.username : ''})\n`;
+                        });
+                        reportMsg += `\n🔄 _Spam berlanjut setiap ${label} untuk sisa target._`;
+                    } else {
+                        reportMsg += `_- Semua target selesai total! -\n_\n🎉 **Pengingat ID #${targetMsgId} dihentikan dan dihapus otomatis.**`;
+                    }
+
+                    bot.telegram.sendMessage(sId, reportMsg, { parse_mode: 'Markdown' }).catch(e => console.error(e));
+
+                    if (schedule.targets.length === 0) {
+                        db.schedules[sId].splice(scheduleIndex, 1);
+                    }
+                }
+            }
+        });
+
+        if (updated) {
+            writeDB(db);
+            ctx.session.state = null; // Reset state setelah berhasil diselesaikan
+            return ctx.reply(`✅ Konfirmasi 'done' untuk pesan ID #${targetMsgId} berhasil diterima.`);
+        } else {
+            // State sengaja tidak dinull-kan agar user bisa menginput ulang jika salah mengetik ID
+            return ctx.reply(`❌ Anda tidak terdaftar dalam antrean aktif untuk pesan ID #${targetMsgId}.\n\nSilahkan cek kembali dan masukkan ID pesan yang benar:`);
+        }
+    }
+
     return next();
 });
 
-// ==================== RESPONSE DONE BERDASARKAN ID PESAN ====================
-
-bot.hears(/^\/(done)\s+(\d+)$/, (ctx) => {
-    const targetId = ctx.chat.id;
-    const targetName = ctx.from.first_name;
-    const targetUsername = ctx.from.username ? `@${ctx.from.username}` : 'Tanpa Username';
-    const targetMsgId = parseInt(ctx.match[2]);
-
-    const db = readDB();
-    let updated = false;
-
-    Object.keys(db.schedules).forEach((senderId) => {
-        const scheduleIndex = db.schedules[senderId].findIndex(s => s.id === targetMsgId);
-
-        if (scheduleIndex !== -1) {
-            const schedule = db.schedules[senderId][scheduleIndex];
-            const index = schedule.targets.indexOf(targetId);
-
-            if (index !== -1) {
-                schedule.targets.splice(index, 1);
-                schedule.doneTargets.push({ id: targetId, name: targetName, username: targetUsername });
-                updated = true;
-
-                const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
-                const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
-
-                let reportMsg = `🔔 **INFO CEPAT: TARGET MERESPON DONE (ID: ${targetMsgId})**\n\n`;
-                reportMsg += `📝 **Isi Pesan:**\n_"${schedule.messageText}"_\n\n`;
-                reportMsg += `✅ **Sudah Done:**\n`;
-                schedule.doneTargets.forEach((t, idx) => reportMsg += `${idx + 1}. ${t.name} (${t.username})\n`);
-
-                reportMsg += `\n⏳ **Belum Done:**\n`;
-                if (schedule.targets.length > 0) {
-                    schedule.targets.forEach((tId, idx) => {
-                        const uObj = db.users.find(u => u.id === tId);
-                        reportMsg += `${idx + 1}. ${uObj ? uObj.first_name : 'User'} (${uObj ? uObj.username : ''})\n`;
-                    });
-                    reportMsg += `\n🔄 _Spam berlanjut setiap ${label} untuk sisa target._`;
-                } else {
-                    reportMsg += `_- Semua target selesai total! -\n_\n🎉 **Pengingat ID #${targetMsgId} dihentikan dan dihapus otomatis.**`;
-                }
-
-                bot.telegram.sendMessage(senderId, reportMsg, { parse_mode: 'Markdown' }).catch(e => console.error(e));
-
-                if (schedule.targets.length === 0) {
-                    db.schedules[senderId].splice(scheduleIndex, 1);
-                }
-            }
-        }
-    });
-
-    if (updated) {
-        writeDB(db);
-        ctx.reply(`✅ Konfirmasi 'done' untuk pesan ID #${targetMsgId} berhasil diterima.`);
-    } else {
-        ctx.reply(`❌ Anda tidak terdaftar dalam antrean aktif untuk pesan ID #${targetMsgId}. Cek kembali nomor ID pesan.`);
-    }
-});
+// ==================== EDUKASI CHAT "DONE" TANPA SLASH ====================
 
 bot.hears(/^(done|Done|DONE)$/, (ctx) => {
-    ctx.replyWithMarkdown("💡 Untuk menyelesaikan antrean pesan, gunakan format: `/done [id_pesan]`\nContoh: `/done 1`\n\nAnda bisa melihat daftar ID pesan aktif pada info laporan berkala.");
+    ctx.replyWithMarkdown("💡 Untuk menyelesaikan antrean pesan, gunakan perintah: \`/done\` lalu masukkan ID pesan saat diminta oleh bot.");
 });
 
 console.log('⏳ [Step 3/4] Mengaktifkan mesin checker dinamis (Tiap 1 Menit)...');
@@ -486,7 +500,7 @@ cron.schedule('*/1 * * * *', () => {
                     isDbChanged = true;
 
                     schedule.targets.forEach((targetId) => {
-                        bot.telegram.sendMessage(targetId, `[PENGINGAT ID: ${schedule.id}]\n\n${schedule.messageText}\n\n💡 Ketik \`/done ${schedule.id}\` jika sudah selesai.`, { parse_mode: 'Markdown' })
+                        bot.telegram.sendMessage(targetId, `[PENGINGAT ID: ${schedule.id}]\n\n${schedule.messageText}\n\n💡 Ketik \`/done\` lalu inputkan ID pesan *${schedule.id}* jika tugas Anda sudah selesai.`, { parse_mode: 'Markdown' })
                             .catch((err) => console.error(`Gagal kirim ke ${targetId}:`, err.message));
                     });
 
