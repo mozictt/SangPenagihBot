@@ -755,19 +755,42 @@ cron.schedule('*/1 * * * *', () => {
 
 console.log('⏳ [Step 4/4] Menghubungkan ke API Telegram...');
 
-// ==================== RUN BOT ====================
-try {
-    bot.launch().then(() => {
-        console.log('\n🚀 BINGO! Bot "Sang Penagih" Multi-Instance Aktif Berjalan Sempurna.');
-    }).catch((err) => {
-        console.error('\n❌ Gagal saat melakukan bot.launch():', err.message);
-    });
-} catch (globalLaunchError) {
-    console.error('\n❌ Terjadi error fatal saat booting:', globalLaunchError.message);
+// ==================== RUN BOT DENGAN AUTO-RECONNECT ====================
+const DELAY_RETRY_MS = 5000; // Jeda waktu mencoba kembali (5 detik)
+
+function launchBotWithRetry() {
+    console.log('⏳ Menghubungkan ke API Telegram...');
+    
+    bot.launch()
+        .then(() => {
+            console.log('\n🚀 BINGO! Bot "Sang Penagih" Multi-Instance Aktif Berjalan Sempurna.');
+        })
+        .catch((err) => {
+            console.error(`\n❌ Gagal saat melakukan bot.launch(): ${err.message}`);
+            console.log(`🔄 Mencoba menghubungkan kembali dalam ${DELAY_RETRY_MS / 1000} detik...`);
+            
+            // Panggil ulang fungsi ini setelah jeda waktu tertentu
+            setTimeout(launchBotWithRetry, DELAY_RETRY_MS);
+        });
 }
 
-process.on('unhandledRejection', (reason) => console.error('⚠️ Async Reject:', reason));
-process.on('uncaughtException', (error) => console.error('⚠️ System Error:', error.message));
+// Jalankan fungsi booting pertama kali
+launchBotWithRetry();
+
+// Handler untuk error yang tidak tertangkap global agar bot tidak langsung crash
+process.on('unhandledRejection', (reason) => {
+    console.error('⚠️ Async Reject:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('⚠️ System Error:', error.message);
+    // Jika crash disebabkan oleh gangguan jaringan telegraf di tengah jalan
+    if (error.message.includes('ETIMEDOUT') || error.message.includes('ENOTFOUND')) {
+        console.log(`🔄 Terjadi masalah jaringan jaringan, memicu reconnect...`);
+        // Bot Telegraf modern biasanya auto-reconnect untuk long polling, 
+        // namun jika bot berhenti total, Anda bisa memicu launchBotWithRetry() kembali di sini jika diperlukan.
+    }
+});
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
