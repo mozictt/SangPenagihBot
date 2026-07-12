@@ -101,13 +101,32 @@ bot.command('users', (ctx) => {
         return ctx.reply("Belum ada user yang terdaftar di bot ini.");
     }
 
-    let response = "📋 **Daftar Seluruh Pengguna Bot:**\n\n";
+    // Gunakan teks biasa (hapus bintang **), agar karakter '_' aman dibaca sebagai teks biasa
+    let response = "📋 Daftar Seluruh Pengguna Bot:\n\n";
     db.users.forEach((user, index) => {
         response += `${index + 1}. ${user.first_name} (${user.username})\n`;
     });
-    response += "\n💡 Gunakan nomor urut di atas saat menyeting target di `/settarget`.";
+    response += "\n💡 Gunakan nomor urut di atas saat menyeting target di /settarget.";
 
-    ctx.replyWithMarkdown(response);
+    // Hapus parse_mode: 'Markdown' di sini agar aman dari karakter underscore username
+    ctx.reply(response);
+});
+
+bot.command('hitung', (ctx) => {
+    if (!ctx.session) ctx.session = {};
+    ctx.session.state = 'MENUNGGU_INPUT_NOTA';
+
+    let panduan = `🧾 **Generator Nota & Hitung Diskon Proporsional**\n\n`;
+    panduan += `Silakan masukkan detail nota dengan format sebagai berikut:\n\n`;
+    panduan += `\`\`\`\n`;
+    panduan += `beli burger jumlahnya 3 dengan harga 20700\n`;
+    panduan += `diskon 4000\n`;
+    panduan += `ongkir 2000\n`;
+    panduan += `ppn 2000\n`;
+    panduan += `\`\`\`\n\n`;
+    panduan += `💡 _Tips: Ketik nama barang, jumlah, harga, diskon, ongkir, dan ppn dalam baris terpisah seperti contoh di atas._`;
+
+    ctx.replyWithMarkdown(panduan);
 });
 
 // Alur /setpesan interaktif
@@ -197,6 +216,140 @@ bot.on('text', (ctx, next) => {
     if (text.startsWith('/')) {
         ctx.session.state = null;
         return next();
+    }
+
+    // STATE REVISI: Memproses Banyak Jenis Barang (Input Harga = Subtotal Kotor)
+    if (ctx.session.state === 'MENUNGGU_INPUT_NOTA') {
+        const lines = text.split('\n');
+
+        let daftarBarang = [];
+        let totalDiskonGlobal = 0;
+        let totalOngkirGlobal = 0;
+        let totalPpnGlobal = 0;
+
+        // 1. Parsing data teks baris demi baris
+        lines.forEach(line => {
+            const l = line.toLowerCase().trim();
+
+            // Deteksi jika baris ini berisi data barang
+            if (l.includes('beli') || l.includes('jumlah')) {
+                const matchQty = l.match(/(?:jumlahnya|jumlah|qty)\s+(\d+)/);
+                const matchHarga = l.match(/(?:harga)\s+(\d+)/);
+                const matchNama = line.match(/(?:beli)\s+(.*?)\s+(?:jumlahnya|jumlah|qty|dengan|harga)/i);
+
+                if (matchQty && matchHarga) {
+                    const qty = parseInt(matchQty[1]);
+                    const inputHargaTotal = parseInt(matchHarga[1]); // Ini adalah HARGA TOTAL SUBBARANG
+                    const namaBarang = matchNama ? matchNama[1].trim() : `Barang ${daftarBarang.length + 1}`;
+
+                    // Hitung harga satuan awal dari total kotor yang diinput
+                    const hargaSatuanAwal = inputHargaTotal / qty;
+
+                    daftarBarang.push({
+                        nama: namaBarang,
+                        qty: qty,
+                        hargaAsli: hargaSatuanAwal,       // Harga per pcs sebelum diskon/beban
+                        subtotalKotor: inputHargaTotal    // Total kotor sub-barang
+                    });
+                }
+            }
+            // Deteksi Diskon Global
+            else if (l.includes('diskon')) {
+                const match = l.match(/diskon\s+(\d+)/);
+                if (match) totalDiskonGlobal = parseInt(match[1]);
+            }
+            // Deteksi Ongkir Global
+            else if (l.includes('ongkir')) {
+                const match = l.match(/ongkir\s+(\d+)/);
+                if (match) totalOngkirGlobal = parseInt(match[1]);
+            }
+            // Deteksi PPN Global
+            else if (l.includes('ppn') || l.includes('pajak')) {
+                const match = l.match(/(?:ppn|pajak)\s+(\d+)/);
+                if (match) totalPpnGlobal = parseInt(match[1]);
+            }
+        });
+
+        if (daftarBarang.length === 0) {
+            return ctx.reply("⚠️ Gagal memproses. Pastikan Anda memasukkan minimal satu barang dengan format jumlah dan harga yang benar.");
+        }
+
+        // 2. Hitung Total Subtotal Kotor Semua Barang untuk menentukan Bobot Proporsional
+        const grandSubtotalKotor = daftarBarang.reduce((sum, item) => sum + item.subtotalKotor, 0);
+
+        // 3. Hitung Proporsi untuk masing-masing barang
+        let hasilNota = `🧾 *NOTA TAGIHAN MULTI-ITEM*\n`;
+        hasilNota += `------------------------------------\n`;
+
+        let grandTotalBersih = 0;
+
+        daftarBarang.forEach(item => {
+            // Rasio proporsional berdasarkan kontribusi harga subtotal kotor barang terhadap total belanjaan
+            const rasioProporsional = item.subtotalKotor / grandSubtotalKotor;
+
+            // Alokasikan diskon, ongkir, dan PPN ke barang ini sesuai rasionya
+            const diskonPorsiBarang = totalDiskonGlobal * rasioProporsional;
+            const ongkirPorsiBarang = totalOngkirGlobal * rasioProporsional;
+            const ppnPorsiBarang = totalPpnGlobal * rasioProporsional;
+
+            // Hitung potongan & beban per 1 pcs barang tersebut
+            const diskonPerPcs = diskonPorsiBarang / item.qty;
+            const ongkirPerPcs = ongkirPorsiBarang / item.qty;
+            const ppnPerPcs = ppnPorsiBarang / item.qty;
+
+            // Kalkulasi harga bersih satuan
+            const hargaBersihPerPcs = item.hargaAsli - diskonPerPcs + ongkirPerPcs + ppnPerPcs;
+            const totalBersihItem = hargaBersihPerPcs * item.qty;
+            grandTotalBersih += totalBersihItem;
+
+            // Susun teks struk per item barang
+            hasilNota += `📦 *${item.nama}* (x${item.qty})\n`;
+            hasilNota += `   • Harga Awal Satuan : Rp ${Math.round(item.hargaAsli).toLocaleString('id-ID')}/pcs\n`;
+
+            if (totalDiskonGlobal > 0) {
+                hasilNota += `   • Potongan (Diskon) : -Rp ${Math.round(diskonPerPcs).toLocaleString('id-ID')}/pcs\n`;
+            }
+            if (totalOngkirGlobal > 0 || totalPpnGlobal > 0) {
+                const totalBebanTambahanPerPcs = ongkirPerPcs + ppnPerPcs;
+                hasilNota += `   • Beban (Ongkir+PPN): +Rp ${Math.round(totalBebanTambahanPerPcs).toLocaleString('id-ID')}/pcs\n`;
+            }
+
+            hasilNota += `   ➡️ *HARGA BERSIH SATUAN:* Rp ${Math.round(hargaBersihPerPcs).toLocaleString('id-ID')}/pcs\n`;
+            hasilNota += `   ➡️ *Subtotal Bersih:* Rp ${Math.round(totalBersihItem).toLocaleString('id-ID')}\n\n`;
+        });
+
+        hasilNota += `------------------------------------\n`;
+        if (totalDiskonGlobal > 0) hasilNota += `📉 Total Diskon: Rp ${totalDiskonGlobal.toLocaleString('id-ID')}\n`;
+        if (totalOngkirGlobal > 0) hasilNota += `🚚 Total Ongkir: Rp ${totalOngkirGlobal.toLocaleString('id-ID')}\n`;
+        if (totalPpnGlobal > 0) hasilNota += `🏛️ Total PPN: Rp ${totalPpnGlobal.toLocaleString('id-ID')}\n`;
+        hasilNota += `💰 *TOTAL ALL ITEM:* Rp ${Math.round(grandTotalBersih).toLocaleString('id-ID')}\n`;
+
+        // 4. Simpan ke Database
+        const db = readDB();
+        if (!db.schedules[senderId]) db.schedules[senderId] = [];
+
+        const newId = db.schedules[senderId].length > 0
+            ? Math.max(...db.schedules[senderId].map(s => s.id)) + 1
+            : 1;
+
+        db.schedules[senderId].push({
+            id: newId,
+            messageText: hasilNota.replace(/\*/g, ''), // Bersihkan teks dari format tebal Markdown saat disimpan
+            targets: [],
+            doneTargets: [],
+            cronInterval: '4h',
+            lastSent: 0
+        });
+        writeDB(db);
+
+        ctx.session.state = null;
+
+        let responseBalikan = `✅ **Nota Berhasil Dihitung (Input Berdasar Subtotal)!**\n\n`;
+        responseBalikan += `${hasilNota}\n`;
+        responseBalikan += `📌 ID Pesan: **${newId}**\n`;
+        responseBalikan += `⏱️ _Default jeda: 4 jam. Gunakan /settarget untuk mulai spam._`;
+
+        return ctx.replyWithMarkdown(responseBalikan);
     }
 
     // 1. STATE: Menerima Teks Isi Pesan (/setpesan)
@@ -397,6 +550,7 @@ bot.on('text', (ctx, next) => {
     }
 
     // REVISI SEKARANG: 7. STATE: Menerima ID Pesan untuk diproses DONE (/done Tahap 2 - Final)
+    // REVISI BARU: 7. STATE: Menerima ID Pesan untuk diproses DONE (/done Tahap 2 - Validasi ID)
     if (ctx.session.state === 'MENUNGGU_ID_DONE') {
         const targetMsgId = parseInt(text);
 
@@ -405,63 +559,115 @@ bot.on('text', (ctx, next) => {
         }
 
         const targetId = ctx.chat.id;
-        const targetName = ctx.from.first_name;
-        const targetUsername = ctx.from.username ? `@${ctx.from.username}` : 'Tanpa Username';
-
         const db = readDB();
-        let updated = false;
+        let isFound = false;
 
+        // Validasi apakah user memang terdaftar di ID pesan tersebut
         Object.keys(db.schedules).forEach((sId) => {
-            const scheduleIndex = db.schedules[sId].findIndex(s => s.id === targetMsgId);
-
-            if (scheduleIndex !== -1) {
-                const schedule = db.schedules[sId][scheduleIndex];
-                const index = schedule.targets.indexOf(targetId);
-
-                if (index !== -1) {
-                    schedule.targets.splice(index, 1);
-                    schedule.doneTargets.push({ id: targetId, name: targetName, username: targetUsername });
-                    updated = true;
-
-                    const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
-                    const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
-
-                    let reportMsg = `🔔 **INFO CEPAT: TARGET MERESPON DONE (ID: ${targetMsgId})**\n\n`;
-                    reportMsg += `📝 **Isi Pesan:**\n_"${schedule.messageText}"_\n\n`;
-                    reportMsg += `✅ **Sudah Done:**\n`;
-                    schedule.doneTargets.forEach((t, idx) => reportMsg += `${idx + 1}. ${t.name} (${t.username})\n`);
-
-                    reportMsg += `\n⏳ **Belum Done:**\n`;
-                    if (schedule.targets.length > 0) {
-                        schedule.targets.forEach((tId, idx) => {
-                            const uObj = db.users.find(u => u.id === tId);
-                            reportMsg += `${idx + 1}. ${uObj ? uObj.first_name : 'User'} (${uObj ? uObj.username : ''})\n`;
-                        });
-                        reportMsg += `\n🔄 _Spam berlanjut setiap ${label} untuk sisa target._`;
-                    } else {
-                        reportMsg += `_- Semua target selesai total! -\n_\n🎉 **Pengingat ID #${targetMsgId} dihentikan dan dihapus otomatis.**`;
-                    }
-
-                    bot.telegram.sendMessage(sId, reportMsg, { parse_mode: 'Markdown' }).catch(e => console.error(e));
-
-                    if (schedule.targets.length === 0) {
-                        db.schedules[sId].splice(scheduleIndex, 1);
-                    }
-                }
+            const schedule = db.schedules[sId].find(s => s.id === targetMsgId);
+            if (schedule && schedule.targets.includes(targetId)) {
+                isFound = true;
             }
         });
 
-        if (updated) {
-            writeDB(db);
-            ctx.session.state = null; // Reset state setelah berhasil diselesaikan
-            return ctx.reply(`✅ Konfirmasi 'done' untuk pesan ID #${targetMsgId} berhasil diterima.`);
+        if (isFound) {
+            // Simpan ID pesan ke session dan pindah ke state menunggu foto
+            ctx.session.tempDoneMsgId = targetMsgId;
+            ctx.session.state = 'MENUNGGU_BUKTI_FOTO';
+            return ctx.reply("📸 ID Pesan valid. Sekarang, silakan **kirimkan foto/gambar** sebagai bukti lampiran:");
         } else {
-            // State sengaja tidak dinull-kan agar user bisa menginput ulang jika salah mengetik ID
             return ctx.reply(`❌ Anda tidak terdaftar dalam antrean aktif untuk pesan ID #${targetMsgId}.\n\nSilahkan cek kembali dan masukkan ID pesan yang benar:`);
         }
     }
 
     return next();
+});
+// ==================== MIDDLEWARE UNTUK MENANGKAP BUKTI FOTO ====================
+bot.on('photo', (ctx) => {
+    if (!ctx.session || ctx.session.state !== 'MENUNGGU_BUKTI_FOTO') {
+        return; // Abaikan jika user mengirim foto tanpa alur /done
+    }
+
+    const targetMsgId = ctx.session.tempDoneMsgId;
+    if (!targetMsgId) {
+        ctx.session.state = null;
+        return ctx.reply("❌ Terjadi kesalahan sesi. Silakan ulangi dengan perintah /done");
+    }
+
+    const targetId = ctx.chat.id;
+    const targetName = ctx.from.first_name;
+    const targetUsername = ctx.from.username ? `@${ctx.from.username}` : 'Tanpa Username';
+
+    // Mengambil file_id foto dengan resolusi tertinggi (paling terakhir di array)
+    const photoId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+    const captionOpsi = ctx.message.caption || ''; // Ambil caption tambahan dari user jika ada
+
+    const db = readDB();
+    let updated = false;
+
+    Object.keys(db.schedules).forEach((sId) => {
+        const scheduleIndex = db.schedules[sId].findIndex(s => s.id === targetMsgId);
+
+        if (scheduleIndex !== -1) {
+            const schedule = db.schedules[sId][scheduleIndex];
+            const index = schedule.targets.indexOf(targetId);
+
+            if (index !== -1) {
+                // Pindahkan target dari daftar antrean ke daftar selesai (doneTargets)
+                schedule.targets.splice(index, 1);
+                schedule.doneTargets.push({ id: targetId, name: targetName, username: targetUsername });
+                updated = true;
+
+                const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
+                const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
+
+                // --- FORMAT CAPTION FOTO UNTUK SENDER (NAMA PENGIRIM DI ATAS) ---
+                let reportMsg = `👤 **PENGIRIM BUKTI:** ${targetName} (${targetUsername})\n`;
+                reportMsg += `🔔 **INFO:** TARGET MERESPON DONE (ID PESAN: #${targetMsgId})\n\n`;
+                reportMsg += `📝 **Isi Pesan Tagihan:**\n_"${schedule.messageText}"_\n`;
+
+                if (captionOpsi) {
+                    reportMsg += `💬 **Catatan Tambahan User:** "${captionOpsi}"\n`;
+                }
+
+                reportMsg += `\n✅ **Sudah Done:**\n`;
+                schedule.doneTargets.forEach((t, idx) => reportMsg += `${idx + 1}. ${t.name} (${t.username})\n`);
+
+                reportMsg += `\n⏳ **Belum Done:**\n`;
+                if (schedule.targets.length > 0) {
+                    schedule.targets.forEach((tId, idx) => {
+                        const uObj = db.users.find(u => u.id === tId);
+                        reportMsg += `${idx + 1}. ${uObj ? uObj.first_name : 'User'} (${uObj ? uObj.username : ''})\n`;
+                    });
+                    reportMsg += `\n🔄 _Spam berlanjut setiap ${label} untuk sisa target._`;
+                } else {
+                    reportMsg += `_- Semua target selesai total! -\n_\n🎉 **Pengingat ID #${targetMsgId} dihentikan dan dihapus otomatis.**`;
+                }
+
+                // Kirim Foto Bukti beserta laporan teks langsung ke pembuat pesan (sId)
+                bot.telegram.sendPhoto(sId, photoId, {
+                    caption: reportMsg,
+                    parse_mode: 'Markdown'
+                }).catch(e => console.error("Gagal mengirim foto bukti ke pembuat pesan:", e));
+
+                // Jika target sudah habis, hapus antrean dari database agar hemat ruang
+                if (schedule.targets.length === 0) {
+                    db.schedules[sId].splice(scheduleIndex, 1);
+                }
+            }
+        }
+    });
+
+    if (updated) {
+        writeDB(db);
+        ctx.session.state = null;
+        ctx.session.tempDoneMsgId = null;
+        return ctx.reply(`✅ Konfirmasi 'done' beserta bukti foto untuk pesan ID #${targetMsgId} berhasil dikirim ke pembuat pesan.`);
+    } else {
+        ctx.session.state = null;
+        ctx.session.tempDoneMsgId = null;
+        return ctx.reply(`❌ Terjadi kesalahan. Anda mendadak tidak ditemukan di daftar antrean.`);
+    }
 });
 
 // ==================== EDUKASI CHAT "DONE" TANPA SLASH ====================
@@ -479,6 +685,11 @@ cron.schedule('*/1 * * * *', () => {
     let isDbChanged = false;
 
     Object.keys(db.schedules).forEach((senderId) => {
+        // CARI INFO PEMBUAT PESAN BERDASARKAN SENDER ID
+        const creator = db.users.find(u => u.id === parseInt(senderId));
+        const creatorName = creator ? creator.first_name : 'Admin/Pembuat';
+        const creatorUsername = creator && creator.username ? ` (${creator.username})` : '';
+
         db.schedules[senderId].forEach((schedule) => {
             if (schedule.targets && schedule.targets.length > 0) {
                 const intervalStr = schedule.cronInterval || '4h';
@@ -499,11 +710,21 @@ cron.schedule('*/1 * * * *', () => {
                     schedule.lastSent = now;
                     isDbChanged = true;
 
+                    // Mengamankan karakter '@' atau '_' pada username agar tidak merusak Markdown tagihan
+                    const safeCreatorUsername = creatorUsername.replace(/_/g, '\\_');
+
+                    // 1. KIRIM SPAM KE TARGET (DITAMBAHKAN NAMA PEMBUAT)
                     schedule.targets.forEach((targetId) => {
-                        bot.telegram.sendMessage(targetId, `[PENGINGAT ID: ${schedule.id}]\n\n${schedule.messageText}\n\n💡 Ketik \`/done\` lalu inputkan ID pesan *${schedule.id}* jika tugas Anda sudah selesai.`, { parse_mode: 'Markdown' })
+                        let spamMsg = `🔔 *[ PENGINGAT / TAGIHAN ]*\n\n`;
+                        spamMsg += `👤 *Dari Pembuat:* ${creatorName}${safeCreatorUsername}\n`;
+                        spamMsg += `📝 *Pesan:* ${schedule.messageText}\n\n`;
+                        spamMsg += `💡 Ketik \`/done\` lalu inputkan ID pesan *${schedule.id}* jika tugas Anda sudah selesai.`;
+
+                        bot.telegram.sendMessage(targetId, spamMsg, { parse_mode: 'Markdown' })
                             .catch((err) => console.error(`Gagal kirim ke ${targetId}:`, err.message));
                     });
 
+                    // 2. KIRIM LAPORAN BERKALA KE SENDER
                     const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
                     let reportMsg = `📊 **LAPORAN BERKALA PESAN ID #${schedule.id} (Tiap ${label})**\n\n`;
                     reportMsg += `📝 **Isi Teks:** "${schedule.messageText}"\n\n`;
