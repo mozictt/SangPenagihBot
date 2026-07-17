@@ -10,5 +10,7 @@ services:
     volumes:
       # Melakukan mounting file database agar tersimpan aman di host machine (server)
       - ./database_v2.json:/app/database_v2.json
+      # Mount index.js secara langsung agar perubahan file di host langsung ter-update di dalam container tanpa rebuild
+      - ./index.js:/app/index.js
     environment:
       - NODE_ENV=production
