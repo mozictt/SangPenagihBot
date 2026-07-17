@@ -10,6 +10,7 @@ console.log('⏳ [Step 1/4] Memulai inisialisasi konfigurasi...');
 
 // ==================== KONFIGURASI ====================
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const ADMIN_ID = process.env.ADMIN_ID;
 
 if (!BOT_TOKEN) {
     console.error('❌ ERROR FATAL: BOT_TOKEN tidak ditemukan di file .env!');
@@ -63,6 +64,37 @@ function writeDB(data) {
 function escapeMarkdown(text) {
     if (!text) return '';
     return text.toString().replace(/[_*`\[]/g, '\\$&');
+}
+
+// Helper untuk memanggil API Telegram dengan retry logic jika terjadi error jaringan (misal ETIMEDOUT)
+async function callTelegramWithRetry(method, ...args) {
+    const retries = 3;
+    let delay = 5000;
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await bot.telegram[method](...args);
+        } catch (err) {
+            const isNetworkError = err.code === 'ETIMEDOUT' || err.errno === 'ETIMEDOUT' ||
+                                   err.message.includes('ETIMEDOUT') || err.message.includes('ENOTFOUND') ||
+                                   err.message.includes('EAI_AGAIN') || err.message.includes('ECONNRESET') ||
+                                   err.message.includes('network');
+            
+            if (isNetworkError && i < retries - 1) {
+                console.warn(`⚠️ [Network] Gagal memanggil ${method} (${err.message}). Mencoba kembali dalam ${delay / 1000} detik... (Percobaan ${i + 1}/${retries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                delay *= 2; // Exponential backoff
+            } else {
+                throw err;
+            }
+        }
+    }
+}
+
+// Fungsi untuk mengirim pesan log error ke Admin
+function sendToAdmin(text) {
+    if (!ADMIN_ID) return;
+    bot.telegram.sendMessage(ADMIN_ID, text)
+        .catch(err => console.error(`[Admin Log] Gagal mengirim log error ke admin:`, err.message));
 }
 
 console.log('⏳ [Step 2/4] Memuat core commands bot...');
@@ -654,9 +686,13 @@ bot.on('text', (ctx, next) => {
                         }
 
                         // Kirim laporan teks langsung ke pembuat pesan (sId) tanpa foto
-                        bot.telegram.sendMessage(sId, reportMsg, {
+                        callTelegramWithRetry('sendMessage', sId, reportMsg, {
                             parse_mode: 'Markdown'
-                        }).catch(e => console.error("Gagal mengirim laporan tunai ke pembuat pesan:", e));
+                        }).catch(e => {
+                            const errMsg = `❌ Gagal mengirim laporan tunai ke pembuat pesan ${sId}: ${e.message}`;
+                            console.error(errMsg);
+                            sendToAdmin(errMsg);
+                        });
 
                         // Jika target sudah habis, hapus antrean dari database agar hemat ruang
                         if (schedule.targets.length === 0) {
@@ -746,10 +782,14 @@ bot.on('photo', (ctx) => {
                 }
 
                 // Kirim Foto Bukti beserta laporan teks langsung ke pembuat pesan (sId)
-                bot.telegram.sendPhoto(sId, photoId, {
+                callTelegramWithRetry('sendPhoto', sId, photoId, {
                     caption: reportMsg,
                     parse_mode: 'Markdown'
-                }).catch(e => console.error("Gagal mengirim foto bukti ke pembuat pesan:", e));
+                }).catch(e => {
+                    const errMsg = `❌ Gagal mengirim foto bukti ke pembuat pesan ${sId}: ${e.message}`;
+                    console.error(errMsg);
+                    sendToAdmin(errMsg);
+                });
 
                 // Jika target sudah habis, hapus antrean dari database agar hemat ruang
                 if (schedule.targets.length === 0) {
@@ -823,8 +863,12 @@ cron.schedule('*/1 * * * *', () => {
                         spamMsg += `📝 *Pesan:* ${safeMessageText}\n\n`;
                         spamMsg += `💡 Ketik \`/done\` lalu inputkan ID pesan *${schedule.id}* jika tugas Anda sudah selesai.`;
 
-                        bot.telegram.sendMessage(targetId, spamMsg, { parse_mode: 'Markdown' })
-                            .catch((err) => console.error(`Gagal kirim ke ${targetId}:`, err.message));
+                        callTelegramWithRetry('sendMessage', targetId, spamMsg, { parse_mode: 'Markdown' })
+                            .catch((err) => {
+                                const errMsg = `❌ Gagal kirim spam ke target ${targetId} (ID Pesan: #${schedule.id}): ${err.message}`;
+                                console.error(errMsg);
+                                sendToAdmin(errMsg);
+                            });
                     });
 
                     // 2. KIRIM LAPORAN BERKALA KE SENDER
@@ -845,7 +889,12 @@ cron.schedule('*/1 * * * *', () => {
                         reportMsg += `${idx + 1}. ${uObj ? escapeMarkdown(uObj.first_name) : 'User'}\n`;
                     });
 
-                    bot.telegram.sendMessage(senderId, reportMsg, { parse_mode: 'Markdown' }).catch(e => console.error(e));
+                    callTelegramWithRetry('sendMessage', senderId, reportMsg, { parse_mode: 'Markdown' })
+                        .catch(e => {
+                            const errMsg = `❌ Gagal kirim laporan berkala ke sender ${senderId} (ID Pesan: #${schedule.id}): ${e.message}`;
+                            console.error(errMsg);
+                            sendToAdmin(errMsg);
+                        });
                 }
             }
         });
@@ -870,6 +919,7 @@ function launchBotWithRetry() {
         })
         .catch((err) => {
             console.error(`\n❌ Gagal saat melakukan bot.launch(): ${err.message}`);
+            sendToAdmin(`❌ Gagal saat melakukan bot.launch(): ${err.message}`);
             console.log(`🔄 Mencoba menghubungkan kembali dalam ${DELAY_RETRY_MS / 1000} detik...`);
             
             // Panggil ulang fungsi ini setelah jeda waktu tertentu
@@ -883,10 +933,12 @@ launchBotWithRetry();
 // Handler untuk error yang tidak tertangkap global agar bot tidak langsung crash
 process.on('unhandledRejection', (reason) => {
     console.error('⚠️ Async Reject:', reason);
+    sendToAdmin(`⚠️ [Unhandled Rejection] ${reason instanceof Error ? reason.stack || reason.message : reason}`);
 });
 
 process.on('uncaughtException', (error) => {
     console.error('⚠️ System Error:', error.message);
+    sendToAdmin(`⚠️ [Uncaught Exception] ${error.stack || error.message}`);
     // Jika crash disebabkan oleh gangguan jaringan telegraf di tengah jalan
     if (error.message.includes('ETIMEDOUT') || error.message.includes('ENOTFOUND')) {
         console.log(`🔄 Terjadi masalah jaringan jaringan, memicu reconnect...`);
