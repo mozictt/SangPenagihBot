@@ -66,6 +66,21 @@ function escapeMarkdown(text) {
     return text.toString().replace(/[_*`\[]/g, '\\$&');
 }
 
+// Fungsi untuk men-generate ID pesan yang unik secara global (di seluruh schedule pemakai)
+function generateGlobalScheduleId(db) {
+    const allIds = [];
+    Object.keys(db.schedules).forEach((senderId) => {
+        if (Array.isArray(db.schedules[senderId])) {
+            db.schedules[senderId].forEach((s) => {
+                if (s && typeof s.id === 'number') {
+                    allIds.push(s.id);
+                }
+            });
+        }
+    });
+    return allIds.length > 0 ? Math.max(...allIds) + 1 : 1;
+}
+
 // Helper untuk memanggil API Telegram dengan retry logic jika terjadi error jaringan (misal ETIMEDOUT)
 async function callTelegramWithRetry(method, ...args) {
     const retries = 3;
@@ -381,9 +396,7 @@ bot.on('text', (ctx, next) => {
         const db = readDB();
         if (!db.schedules[senderId]) db.schedules[senderId] = [];
 
-        const newId = db.schedules[senderId].length > 0
-            ? Math.max(...db.schedules[senderId].map(s => s.id)) + 1
-            : 1;
+        const newId = generateGlobalScheduleId(db);
 
         db.schedules[senderId].push({
             id: newId,
@@ -413,9 +426,7 @@ bot.on('text', (ctx, next) => {
             db.schedules[senderId] = [];
         }
 
-        const newId = db.schedules[senderId].length > 0
-            ? Math.max(...db.schedules[senderId].map(s => s.id)) + 1
-            : 1;
+        const newId = generateGlobalScheduleId(db);
 
         const newSchedule = {
             id: newId,
@@ -820,7 +831,7 @@ bot.hears(/^(done|Done|DONE)$/, (ctx) => {
 console.log('⏳ [Step 3/4] Mengaktifkan mesin checker dinamis (Tiap 1 Menit)...');
 
 // ==================== ENGINE CHECKER DINAMIS ENGINE V3 ====================
-cron.schedule('*/1 * * * *', () => {
+cron.schedule('*/20 * * * *', () => {
     const db = readDB();
     const now = Date.now();
     let isDbChanged = false;
