@@ -137,6 +137,7 @@ bot.start((ctx) => {
         `🎵 \`/users\` — Melihat daftar nomor urut pengguna bot.\n` +
         `📝 \`/setpesan\` — Membuat teks pengingat baru.\n` +
         `⏱️ \`/setwaktu\` — Mengatur jeda waktu pengiriman ulang pesan.\n` +
+        `🖼️ \`/setqr\` — Menambahkan gambar QRIS pembayaran pada pesan.\n` +
         `🎯 \`/settarget\` — Memilih target pengguna yang akan dikirimi pesan.\n` +
         `📊 \`/status\` — Meninjau semua daftar antrean pengingat aktif Anda.\n` +
         `🗑️ \`/delpesan\` — Menghapus pesan pengingat tertentu.\n\n` +
@@ -196,6 +197,13 @@ bot.command('setwaktu', (ctx) => {
     ctx.reply("⏱️ Silahkan masukkan id pesanya:");
 });
 
+// Alur /setqr interaktif Tahap 1
+bot.command('setqr', (ctx) => {
+    if (!ctx.session) ctx.session = {};
+    ctx.session.state = 'MENUNGGU_ID_QR';
+    ctx.reply("🖼️ Silahkan masukkan id pesanya untuk dipasang QRIS:");
+});
+
 // Alur /settarget interaktif Tahap 1
 bot.command('settarget', (ctx) => {
     if (!ctx.session) ctx.session = {};
@@ -235,6 +243,9 @@ bot.command('status', (ctx) => {
         response += `🆔 **ID Pesan: ${schedule.id}**\n`;
         response += `💬 Pesan: "${escapeMarkdown(schedule.messageText)}"\n`;
         response += `⏱️ Jeda: Tiap ${label}\n`;
+        if (schedule.qrPhotoId) {
+            response += `🖼️ QRIS: Terpasang\n`;
+        }
 
         response += `✅ Done (${schedule.doneTargets.length}): `;
         if (schedule.doneTargets.length > 0) {
@@ -442,6 +453,28 @@ bot.on('text', (ctx, next) => {
 
         ctx.session.state = null; // Reset state
         return ctx.replyWithMarkdown(`✅ Pesan baru berhasil dibuat dengan **ID: ${newId}**\n\n💬 Pesan: "${escapeMarkdown(text)}"\n\n⏱️ _Default jeda: 4 jam. Silakan atur jeda waktu menggunakan perintah:_ \`/setwaktu\``);
+    }
+
+    // STATE: Menerima ID Pesan untuk QRIS (/setqr Tahap 1)
+    if (ctx.session.state === 'MENUNGGU_ID_QR') {
+        const targetMsgId = parseInt(text);
+
+        if (isNaN(targetMsgId)) {
+            return ctx.reply("⚠️ ID Pesan harus berupa angka. Silahkan masukkan kembali id pesanya:");
+        }
+
+        const db = readDB();
+        const userSchedules = db.schedules[senderId] || [];
+        const schedule = userSchedules.find(s => s.id === targetMsgId);
+
+        if (!schedule) {
+            return ctx.reply(`❌ Pengingat dengan ID ${targetMsgId} tidak ditemukan. Silahkan masukkan ID pesan yang benar (cek di /status):`);
+        }
+
+        ctx.session.tempQrMsgId = targetMsgId;
+        ctx.session.state = 'MENUNGGU_FOTO_QR';
+
+        return ctx.reply("📸 Silahkan kirimkan foto/gambar QRIS pembayaran untuk pesan ini:");
     }
 
     // 2. STATE: Menerima ID Pesan untuk Waktu (/setwaktu Tahap 1)
@@ -730,9 +763,41 @@ bot.on('text', (ctx, next) => {
 
     return next();
 });
-// ==================== MIDDLEWARE UNTUK MENANGKAP BUKTI FOTO ====================
+// ==================== MIDDLEWARE UNTUK MENANGKAP FOTO (BUKTI ATAU QRIS) ====================
 bot.on('photo', (ctx) => {
-    if (!ctx.session || ctx.session.state !== 'MENUNGGU_BUKTI_FOTO') {
+    if (!ctx.session) return;
+
+    // Jika sedang menunggu foto QRIS
+    if (ctx.session.state === 'MENUNGGU_FOTO_QR') {
+        const targetMsgId = ctx.session.tempQrMsgId;
+        if (!targetMsgId) {
+            ctx.session.state = null;
+            return ctx.reply("❌ Terjadi kesalahan sesi. Silakan ulangi dengan perintah /setqr");
+        }
+
+        const senderId = ctx.from.id;
+        const photoId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+
+        const db = readDB();
+        const userSchedules = db.schedules[senderId] || [];
+        const schedule = userSchedules.find(s => s.id === targetMsgId);
+
+        if (!schedule) {
+            ctx.session.state = null;
+            ctx.session.tempQrMsgId = null;
+            return ctx.reply("❌ Data pengingat tidak ditemukan. Proses dibatalkan.");
+        }
+
+        schedule.qrPhotoId = photoId;
+        writeDB(db);
+
+        ctx.session.state = null;
+        ctx.session.tempQrMsgId = null;
+
+        return ctx.replyWithMarkdown(`✅ Gambar QRIS berhasil ditambahkan untuk Pesan **ID: ${targetMsgId}**`);
+    }
+
+    if (ctx.session.state !== 'MENUNGGU_BUKTI_FOTO') {
         return; // Abaikan jika user mengirim foto tanpa alur /done
     }
 
@@ -831,7 +896,7 @@ bot.hears(/^(done|Done|DONE)$/, (ctx) => {
 console.log('⏳ [Step 3/4] Mengaktifkan mesin checker dinamis (Tiap 1 Menit)...');
 
 // ==================== ENGINE CHECKER DINAMIS ENGINE V3 ====================
-cron.schedule('*/20 * * * *', () => {
+cron.schedule('*/10 * * * *', () => {
     const db = readDB();
     const now = Date.now();
     let isDbChanged = false;
@@ -874,12 +939,23 @@ cron.schedule('*/20 * * * *', () => {
                         spamMsg += `📝 *Pesan:* ${safeMessageText}\n\n`;
                         spamMsg += `💡 Ketik \`/done\` lalu inputkan ID pesan *${schedule.id}* jika tugas Anda sudah selesai.`;
 
-                        callTelegramWithRetry('sendMessage', targetId, spamMsg, { parse_mode: 'Markdown' })
-                            .catch((err) => {
-                                const errMsg = `❌ Gagal kirim spam ke target ${targetId} (ID Pesan: #${schedule.id}): ${err.message}`;
+                        if (schedule.qrPhotoId) {
+                            callTelegramWithRetry('sendPhoto', targetId, schedule.qrPhotoId, {
+                                caption: spamMsg,
+                                parse_mode: 'Markdown'
+                            }).catch((err) => {
+                                const errMsg = `❌ Gagal kirim spam QRIS ke target ${targetId} (ID Pesan: #${schedule.id}): ${err.message}`;
                                 console.error(errMsg);
                                 sendToAdmin(errMsg);
                             });
+                        } else {
+                            callTelegramWithRetry('sendMessage', targetId, spamMsg, { parse_mode: 'Markdown' })
+                                .catch((err) => {
+                                    const errMsg = `❌ Gagal kirim spam ke target ${targetId} (ID Pesan: #${schedule.id}): ${err.message}`;
+                                    console.error(errMsg);
+                                    sendToAdmin(errMsg);
+                                });
+                        }
                     });
 
                     // 2. KIRIM LAPORAN BERKALA KE SENDER
