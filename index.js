@@ -238,7 +238,7 @@ bot.command('status', (ctx) => {
 
     userSchedules.forEach((schedule) => {
         const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
-        const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
+        const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '2 Jam';
 
         response += `🆔 **ID Pesan: ${schedule.id}**\n`;
         response += `💬 Pesan: "${escapeMarkdown(schedule.messageText)}"\n`;
@@ -414,7 +414,7 @@ bot.on('text', (ctx, next) => {
             messageText: hasilNota.replace(/\*/g, ''), // Bersihkan teks dari format tebal Markdown saat disimpan
             targets: [],
             doneTargets: [],
-            cronInterval: '4h',
+            cronInterval: '2h',
             lastSent: 0
         });
         writeDB(db);
@@ -424,7 +424,7 @@ bot.on('text', (ctx, next) => {
         let responseBalikan = `✅ **Nota Berhasil Dihitung (Input Berdasar Subtotal)!**\n\n`;
         responseBalikan += `${hasilNota}\n`;
         responseBalikan += `📌 ID Pesan: **${newId}**\n`;
-        responseBalikan += `⏱️ _Default jeda: 4 jam. Gunakan /settarget untuk mulai spam._`;
+        responseBalikan += `⏱️ _Default jeda: 2 jam. Gunakan /settarget untuk mulai spam._`;
 
         return ctx.replyWithMarkdown(responseBalikan);
     }
@@ -444,7 +444,7 @@ bot.on('text', (ctx, next) => {
             messageText: text,
             targets: [],
             doneTargets: [],
-            cronInterval: '4h',
+            cronInterval: '2h',
             lastSent: 0
         };
 
@@ -452,7 +452,7 @@ bot.on('text', (ctx, next) => {
         writeDB(db);
 
         ctx.session.state = null; // Reset state
-        return ctx.replyWithMarkdown(`✅ Pesan baru berhasil dibuat dengan **ID: ${newId}**\n\n💬 Pesan: "${escapeMarkdown(text)}"\n\n⏱️ _Default jeda: 4 jam. Silakan atur jeda waktu menggunakan perintah:_ \`/setwaktu\``);
+        return ctx.replyWithMarkdown(`✅ Pesan baru berhasil dibuat dengan **ID: ${newId}**\n\n💬 Pesan: "${escapeMarkdown(text)}"\n\n⏱️ _Default jeda: 2 jam. Silakan atur jeda waktu menggunakan perintah:_ \`/setwaktu\``);
     }
 
     // STATE: Menerima ID Pesan untuk QRIS (/setqr Tahap 1)
@@ -608,7 +608,7 @@ bot.on('text', (ctx, next) => {
         if (targetNames.length > 0) {
             writeDB(db);
             const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
-            const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
+            const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '2 Jam';
 
             ctx.session.state = null;
             ctx.session.tempTargetMsgId = null;
@@ -708,7 +708,7 @@ bot.on('text', (ctx, next) => {
                         updated = true;
 
                         const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
-                        const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
+                        const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '2 Jam';
 
                         // --- FORMAT LAPORAN UNTUK SENDER (PEMBAYARAN TUNAI) ---
                         let reportMsg = `👤 **PENGIRIM BUKTI (TUNAI):** ${escapeMarkdown(targetName)} (${escapeMarkdown(targetUsername)})\n`;
@@ -832,7 +832,7 @@ bot.on('photo', (ctx) => {
                 updated = true;
 
                 const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
-                const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
+                const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '2 Jam';
 
                 // --- FORMAT CAPTION FOTO UNTUK SENDER (NAMA PENGIRIM DI ATAS) ---
                 let reportMsg = `👤 **PENGIRIM BUKTI:** ${escapeMarkdown(targetName)} (${escapeMarkdown(targetUsername)})\n`;
@@ -896,7 +896,7 @@ bot.hears(/^(done|Done|DONE)$/, (ctx) => {
 console.log('⏳ [Step 3/4] Mengaktifkan mesin checker dinamis (Tiap 1 Menit)...');
 
 // ==================== ENGINE CHECKER DINAMIS ENGINE V3 ====================
-cron.schedule('*/10 * * * *', () => {
+cron.schedule('*/5 * * * *', () => {
     const db = readDB();
     const now = Date.now();
     let isDbChanged = false;
@@ -909,10 +909,10 @@ cron.schedule('*/10 * * * *', () => {
 
         db.schedules[senderId].forEach((schedule) => {
             if (schedule.targets && schedule.targets.length > 0) {
-                const intervalStr = schedule.cronInterval || '4h';
+                const intervalStr = schedule.cronInterval || '2h';
                 const match = intervalStr.match(/^(\d+)(m|h)$/);
 
-                let intervalMs = 4 * 60 * 60 * 1000;
+                let intervalMs = 2 * 60 * 60 * 1000;
                 if (match) {
                     const value = parseInt(match[1]);
                     intervalMs = match[2] === 'm' ? value * 60 * 1000 : value * 60 * 60 * 1000;
@@ -959,7 +959,7 @@ cron.schedule('*/10 * * * *', () => {
                     });
 
                     // 2. KIRIM LAPORAN BERKALA KE SENDER
-                    const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '4 Jam';
+                    const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '2 Jam';
                     let reportMsg = `📊 **LAPORAN BERKALA PESAN ID #${schedule.id} (Tiap ${label})**\n\n`;
                     reportMsg += `📝 **Isi Teks:** "${safeMessageText}"\n\n`;
 
