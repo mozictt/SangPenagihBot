@@ -607,13 +607,62 @@ bot.on('text', (ctx, next) => {
 
         if (targetNames.length > 0) {
             writeDB(db);
+            
+            // --- KIRIM NOTIFIKASI PERTAMA LANGSUNG KE TARGET ---
+            const creator = db.users.find(u => u.id === senderId);
+            const creatorName = creator ? creator.first_name : 'Admin/Pembuat';
+            const creatorUsername = creator && creator.username ? ` (${creator.username})` : '';
+
+            const safeCreatorUsername = escapeMarkdown(creatorUsername);
+            const safeCreatorName = escapeMarkdown(creatorName);
+            const safeMessageText = escapeMarkdown(schedule.messageText);
+
+            schedule.targets.forEach((targetId) => {
+                let spamMsg = `🔔 *[ PENGINGAT / TAGIHAN ]*\n\n`;
+                spamMsg += `👤 *Dari Pembuat:* ${safeCreatorName}${safeCreatorUsername}\n`;
+                spamMsg += `📝 *Pesan:* ${safeMessageText}\n\n`;
+                spamMsg += `💡 Ketik \`/done\` lalu inputkan ID pesan *${schedule.id}* jika tugas Anda sudah selesai.`;
+
+                if (schedule.qrPhotoId) {
+                    if (spamMsg.length > 1000) {
+                        callTelegramWithRetry('sendPhoto', targetId, schedule.qrPhotoId, {
+                            caption: `🔔 *[ PENGINGAT / TAGIHAN ]*\n_Silahkan cek pesan teks di bawah ini._`,
+                            parse_mode: 'Markdown'
+                        }).then(() => {
+                            return callTelegramWithRetry('sendMessage', targetId, spamMsg, { parse_mode: 'Markdown' });
+                        }).catch((err) => {
+                            const errMsg = `❌ Gagal kirim notif pertama QRIS ke target ${targetId} (ID Pesan: #${schedule.id}): ${err.message}`;
+                            console.error(errMsg);
+                            sendToAdmin(errMsg);
+                        });
+                    } else {
+                        callTelegramWithRetry('sendPhoto', targetId, schedule.qrPhotoId, {
+                            caption: spamMsg,
+                            parse_mode: 'Markdown'
+                        }).catch((err) => {
+                            const errMsg = `❌ Gagal kirim notif pertama QRIS ke target ${targetId} (ID Pesan: #${schedule.id}): ${err.message}`;
+                            console.error(errMsg);
+                            sendToAdmin(errMsg);
+                        });
+                    }
+                } else {
+                    callTelegramWithRetry('sendMessage', targetId, spamMsg, { parse_mode: 'Markdown' })
+                        .catch((err) => {
+                            const errMsg = `❌ Gagal kirim notif pertama ke target ${targetId} (ID Pesan: #${schedule.id}): ${err.message}`;
+                            console.error(errMsg);
+                            sendToAdmin(errMsg);
+                        });
+                }
+            });
+            // ---------------------------------------------------
+
             const match = schedule.cronInterval.match(/^(\d+)(m|h)$/);
             const label = match ? `${match[1]} ${match[2] === 'm' ? 'Menit' : 'Jam'}` : '2 Jam';
 
             ctx.session.state = null;
             ctx.session.tempTargetMsgId = null;
 
-            return ctx.replyWithMarkdown(`🎯 Pesan **ID: ${targetMsgId}** berhasil diseting menuju: ${targetNames.join(', ')}\nBot mulai mengirim berkala tiap *${label}*.`);
+            return ctx.replyWithMarkdown(`🎯 Pesan **ID: ${targetMsgId}** berhasil diseting menuju: ${targetNames.join(', ')}\n✅ Notifikasi pertama telah dikirim. Bot mulai mengirim berkala tiap *${label}*.`);
         } else {
             return ctx.reply("❌ Nomor urut user salah atau tidak terdaftar di sistem. Silahkan masukkan ulang nomor target yang benar:");
         }
@@ -858,14 +907,27 @@ bot.on('photo', (ctx) => {
                 }
 
                 // Kirim Foto Bukti beserta laporan teks langsung ke pembuat pesan (sId)
-                callTelegramWithRetry('sendPhoto', sId, photoId, {
-                    caption: reportMsg,
-                    parse_mode: 'Markdown'
-                }).catch(e => {
-                    const errMsg = `❌ Gagal mengirim foto bukti ke pembuat pesan ${sId}: ${e.message}`;
-                    console.error(errMsg);
-                    sendToAdmin(errMsg);
-                });
+                if (reportMsg.length > 1000) {
+                    callTelegramWithRetry('sendPhoto', sId, photoId, {
+                        caption: `👤 **PENGIRIM BUKTI:** ${escapeMarkdown(targetName)}\n🔔 **INFO:** TARGET MERESPON DONE (ID PESAN: #${targetMsgId})\n\n_Laporan lengkap dikirim pada pesan selanjutnya._`,
+                        parse_mode: 'Markdown'
+                    }).then(() => {
+                        return callTelegramWithRetry('sendMessage', sId, reportMsg, { parse_mode: 'Markdown' });
+                    }).catch(e => {
+                        const errMsg = `❌ Gagal mengirim foto bukti/laporan ke pembuat pesan ${sId}: ${e.message}`;
+                        console.error(errMsg);
+                        sendToAdmin(errMsg);
+                    });
+                } else {
+                    callTelegramWithRetry('sendPhoto', sId, photoId, {
+                        caption: reportMsg,
+                        parse_mode: 'Markdown'
+                    }).catch(e => {
+                        const errMsg = `❌ Gagal mengirim foto bukti ke pembuat pesan ${sId}: ${e.message}`;
+                        console.error(errMsg);
+                        sendToAdmin(errMsg);
+                    });
+                }
 
                 // Jika target sudah habis, hapus antrean dari database agar hemat ruang
                 if (schedule.targets.length === 0) {
@@ -940,14 +1002,27 @@ cron.schedule('*/5 * * * *', () => {
                         spamMsg += `💡 Ketik \`/done\` lalu inputkan ID pesan *${schedule.id}* jika tugas Anda sudah selesai.`;
 
                         if (schedule.qrPhotoId) {
-                            callTelegramWithRetry('sendPhoto', targetId, schedule.qrPhotoId, {
-                                caption: spamMsg,
-                                parse_mode: 'Markdown'
-                            }).catch((err) => {
-                                const errMsg = `❌ Gagal kirim spam QRIS ke target ${targetId} (ID Pesan: #${schedule.id}): ${err.message}`;
-                                console.error(errMsg);
-                                sendToAdmin(errMsg);
-                            });
+                            if (spamMsg.length > 1000) {
+                                callTelegramWithRetry('sendPhoto', targetId, schedule.qrPhotoId, {
+                                    caption: `🔔 *[ PENGINGAT / TAGIHAN ]*\n_Silahkan cek pesan teks di bawah ini._`,
+                                    parse_mode: 'Markdown'
+                                }).then(() => {
+                                    return callTelegramWithRetry('sendMessage', targetId, spamMsg, { parse_mode: 'Markdown' });
+                                }).catch((err) => {
+                                    const errMsg = `❌ Gagal kirim spam QRIS ke target ${targetId} (ID Pesan: #${schedule.id}): ${err.message}`;
+                                    console.error(errMsg);
+                                    sendToAdmin(errMsg);
+                                });
+                            } else {
+                                callTelegramWithRetry('sendPhoto', targetId, schedule.qrPhotoId, {
+                                    caption: spamMsg,
+                                    parse_mode: 'Markdown'
+                                }).catch((err) => {
+                                    const errMsg = `❌ Gagal kirim spam QRIS ke target ${targetId} (ID Pesan: #${schedule.id}): ${err.message}`;
+                                    console.error(errMsg);
+                                    sendToAdmin(errMsg);
+                                });
+                            }
                         } else {
                             callTelegramWithRetry('sendMessage', targetId, spamMsg, { parse_mode: 'Markdown' })
                                 .catch((err) => {
